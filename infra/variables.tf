@@ -3,7 +3,7 @@ variable "stage" {
   default     = "local"
   description = <<-EOT
     Deployment stage.
-    "local"  → LocalStack hot-reload via magic "hot-reload" S3 bucket.
+    "local"  → Floci hot-reload via magic "hot-reload" S3 bucket.
     Anything else (e.g. "prod") → real zip deploy to AWS.
   EOT
 

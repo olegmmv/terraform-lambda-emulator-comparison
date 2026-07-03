@@ -13,12 +13,15 @@ terraform {
   }
 }
 
-# tflocal injects localstack_providers_override.tf to redirect all endpoints
-# to localhost:4566. You never edit this file for local vs prod switching.
+# tflocal generates localstack_providers_override.tf to redirect all endpoints
+# to localhost:4566, where Floci listens (Floci is API-compatible with the
+# LocalStack endpoint, so tflocal works unchanged). You never edit this file
+# for local vs prod switching.
 provider "aws" {
   region = "us-east-1"
 
-  # Dummy creds for LocalStack. Replace with your credential chain for real AWS.
+  # Dummy creds for Floci (any non-empty values work). Replace with your
+  # credential chain for real AWS.
   access_key = "test"
   secret_key = "test"
 
@@ -58,8 +61,10 @@ resource "aws_iam_role_policy_attachment" "lambda_basic" {
   policy_arn = "arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"
 }
 
-# When s3_bucket = "hot-reload", LocalStack bind-mounts s3_key (an absolute
-# path on the HOST) into /var/task and watches for file changes.
+# When s3_bucket = "hot-reload", Floci bind-mounts s3_key (an absolute
+# path on the HOST) into the Lambda container and reloads on the next invoke
+# when files change. Requires FLOCI_SERVICES_LAMBDA_HOT_RELOAD_ENABLED=true
+# (set in docker-compose.yml) — Floci ships this off by default.
 # For real AWS, s3_bucket/s3_key are null and the zip is used instead.
 resource "aws_lambda_function" "hello" {
   function_name = "hello"
@@ -67,7 +72,7 @@ resource "aws_lambda_function" "hello" {
   handler       = "hello.handler"
   runtime       = "nodejs20.x"
 
-  # LocalStack hot-reload
+  # Floci hot-reload
   s3_bucket = local.is_local ? "hot-reload" : null
   s3_key    = local.is_local ? var.lambda_mount_path : null
 

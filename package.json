@@ -1,11 +1,11 @@
 {
   "name": "terraform-lambda-typescript-localstack",
   "version": "1.0.0",
-  "description": "TypeScript Lambda local development with Terraform and LocalStack hot-reload",
+  "description": "TypeScript Lambda local development with Terraform and Floci hot-reload",
   "scripts": {
     "build": "esbuild src/handlers/hello.ts --bundle --platform=node --target=node20 --outdir=dist --format=cjs",
     "watch": "esbuild src/handlers/hello.ts --bundle --platform=node --target=node20 --outdir=dist --format=cjs --watch",
-    "invoke": "awslocal lambda invoke --function-name hello --cli-binary-format raw-in-base64-out --payload '{\"queryStringParameters\":{\"name\":\"LocalStack\"}}' /dev/stdout",
+    "invoke": "awslocal lambda invoke --function-name hello --cli-binary-format raw-in-base64-out --payload '{\"queryStringParameters\":{\"name\":\"Floci\"}}' /dev/stdout",
     "logs": "awslocal logs tail /aws/lambda/hello --follow",
     "type-check": "tsc --noEmit"
   },

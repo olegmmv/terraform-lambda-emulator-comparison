@@ -2,17 +2,11 @@
 # setup.sh — one-shot local environment bootstrap
 set -euo pipefail
 
+# awslocal/tflocal are LocalStack's host CLIs; they target http://localhost:4566,
+# where Floci is API-compatible, so they work unchanged. Floci needs no auth token.
 for cmd in docker node npm awslocal tflocal; do
   command -v "$cmd" &>/dev/null || { echo "Error: $cmd not found." >&2; exit 1; }
 done
-
-if [ -z "${LOCALSTACK_AUTH_TOKEN:-}" ]; then
-  echo "LOCALSTACK_AUTH_TOKEN is not set."
-  echo "Get your free token at https://app.localstack.cloud (Hobby plan)"
-  printf "Paste your token: "
-  read -r LOCALSTACK_AUTH_TOKEN
-  export LOCALSTACK_AUTH_TOKEN
-fi
 
 export HOST_DIST_PATH="$(pwd)/dist"
 
@@ -22,20 +16,20 @@ npm install
 echo "▶ Building TypeScript → dist/..."
 npm run build
 
-echo "▶ Starting LocalStack (HOST_DIST_PATH=${HOST_DIST_PATH})..."
+echo "▶ Starting Floci (HOST_DIST_PATH=${HOST_DIST_PATH})..."
 docker compose up -d
 
-echo "▶ Waiting for LocalStack to be ready..."
+echo "▶ Waiting for Floci to be ready..."
 elapsed=0
 until awslocal lambda list-functions &>/dev/null 2>&1; do
   sleep 1
   elapsed=$((elapsed + 1))
   if [ "$elapsed" -ge 30 ]; then
-    echo "Error: LocalStack didn't start within 30s. Check: docker compose logs localstack" >&2
+    echo "Error: Floci didn't start within 30s. Check: docker compose logs floci" >&2
     exit 1
   fi
 done
-echo "  LocalStack is up."
+echo "  Floci is up."
 
 echo "▶ Running tflocal apply..."
 cd infra
