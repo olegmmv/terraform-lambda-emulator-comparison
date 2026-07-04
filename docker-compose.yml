@@ -1,16 +1,9 @@
 services:
-  localstack:
-    image: localstack/localstack:latest
+  ministack:
+    image: ministackorg/ministack:latest
     ports:
       - "4566:4566"
-    environment:
-      - LOCALSTACK_AUTH_TOKEN=${LOCALSTACK_AUTH_TOKEN}
-      - DEBUG=0
-      - LAMBDA_DOCKER_FLAGS=-e LOCALSTACK_FILE_WATCHER_STRATEGY=polling
-    volumes:
-      - "/var/run/docker.sock:/var/run/docker.sock"
-      # LocalStack spawns a child container per Lambda invoke and mounts this
-      # path from the HOST directly. Both sides must be the same absolute path.
-      # Set HOST_DIST_PATH before `docker compose up`:
-      #   export HOST_DIST_PATH="$(pwd)/dist"
-      - "${HOST_DIST_PATH}:${HOST_DIST_PATH}"
+    # No auth token, and no host code mount: MiniStack runs Node.js Lambdas in
+    # warm worker pools inside its own process, so there is nothing to bind-mount.
+    # The Docker socket is only needed for container-backed services (RDS, ECS,
+    # provided.* runtimes) — not for this nodejs20.x function.

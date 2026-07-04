@@ -2,23 +2,14 @@ variable "stage" {
   type        = string
   default     = "local"
   description = <<-EOT
-    Deployment stage.
-    "local"  → LocalStack hot-reload via magic "hot-reload" S3 bucket.
-    Anything else (e.g. "prod") → real zip deploy to AWS.
+    Deployment stage. Same zip deploy either way — only the AWS endpoints differ.
+    "local"  → deploy to MiniStack (endpoints redirected to localhost:4566 by tflocal).
+    Anything else (e.g. "prod") → deploy to real AWS.
+    Also drives the IAM role name and the STAGE env var passed to the function.
   EOT
 
   validation {
     condition     = length(var.stage) > 0
     error_message = "stage must not be empty."
   }
-}
-
-variable "lambda_mount_path" {
-  type        = string
-  default     = ""
-  description = <<-EOT
-    Absolute path to the dist/ directory on the HOST machine.
-    Required when stage = "local". Must match the volume mount in docker-compose.yml.
-    Example: "/Users/you/project/dist"
-  EOT
 }

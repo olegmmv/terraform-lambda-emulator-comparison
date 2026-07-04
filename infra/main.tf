@@ -13,12 +13,15 @@ terraform {
   }
 }
 
-# tflocal injects localstack_providers_override.tf to redirect all endpoints
-# to localhost:4566. You never edit this file for local vs prod switching.
+# tflocal generates localstack_providers_override.tf to redirect all endpoints
+# to localhost:4566, where MiniStack listens (it is LocalStack-endpoint
+# compatible, so tflocal works unchanged). You never edit this file for local
+# vs prod switching.
 provider "aws" {
   region = "us-east-1"
 
-  # Dummy creds for LocalStack. Replace with your credential chain for real AWS.
+  # Dummy creds for MiniStack (any values work). Replace with your credential
+  # chain for real AWS.
   access_key = "test"
   secret_key = "test"
 
@@ -27,14 +30,12 @@ provider "aws" {
   skip_requesting_account_id  = true
 }
 
-locals {
-  is_local = var.stage == "local"
-}
-
-# Zip — only built for real AWS deploys (count = 0 when local)
+# Zip is always built from dist/. Both stages deploy the same way — from a zip.
+# MiniStack runs Node.js Lambdas in warm worker pools inside its own process
+# (no per-function container, no bind-mount), so there is no hot-reload magic
+# bucket to switch to for local. tflocal only rewrites the AWS endpoints to
+# MiniStack; the Terraform config itself is identical for local and prod.
 data "archive_file" "lambda_zip" {
-  count = local.is_local ? 0 : 1
-
   type        = "zip"
   source_dir  = "${path.module}/../dist"
   output_path = "${path.module}/.build/lambda.zip"
@@ -58,22 +59,17 @@ resource "aws_iam_role_policy_attachment" "lambda_basic" {
   policy_arn = "arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"
 }
 
-# When s3_bucket = "hot-reload", LocalStack bind-mounts s3_key (an absolute
-# path on the HOST) into /var/task and watches for file changes.
-# For real AWS, s3_bucket/s3_key are null and the zip is used instead.
+# Deployed from the zip on both MiniStack (local) and real AWS (prod). To pick
+# up a code change, rebuild the zip and re-apply — Terraform sees the new
+# source_code_hash and calls UpdateFunctionCode. There is no hot-reload.
 resource "aws_lambda_function" "hello" {
   function_name = "hello"
   role          = aws_iam_role.lambda_exec.arn
   handler       = "hello.handler"
   runtime       = "nodejs20.x"
 
-  # LocalStack hot-reload
-  s3_bucket = local.is_local ? "hot-reload" : null
-  s3_key    = local.is_local ? var.lambda_mount_path : null
-
-  # Real AWS
-  filename         = local.is_local ? null : data.archive_file.lambda_zip[0].output_path
-  source_code_hash = local.is_local ? null : data.archive_file.lambda_zip[0].output_base64sha256
+  filename         = data.archive_file.lambda_zip.output_path
+  source_code_hash = data.archive_file.lambda_zip.output_base64sha256
 
   environment {
     variables = {

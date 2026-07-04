@@ -1,44 +1,86 @@
-# TypeScript Lambda hot-reload with Terraform and LocalStack
+# TypeScript Lambda on MiniStack with Terraform
 
-Sub-second Lambda iteration cycles using the same Terraform config that deploys to production.
+Local TypeScript Lambda development against [MiniStack](https://github.com/ministackorg/ministack)
+— a free, LocalStack-compatible AWS emulator — using the same Terraform config that deploys to
+real AWS. `tflocal` only rewrites the AWS endpoints to `localhost:4566`; the `main.tf` is
+identical for local and prod.
 
-No second config file. No manual `aws lambda update-function-code`. No re-running `tflocal apply` on every edit.
+> **No hot-reload here.** Unlike LocalStack, MiniStack runs Node.js Lambdas in warm worker pools
+> inside its own process — no per-function container, no bind-mount — so the LocalStack
+> "hot-reload magic bucket" has no equivalent. Code is deployed from a zip; to pick up a change
+> you rebuild and re-apply. See [How it works](#how-it-works) and the [gotcha](#-important-the-hot-reload-magic-bucket-does-not-exist-on-ministack).
 
 ---
 
 ## How it works
 
-The key is LocalStack's **hot-reload magic bucket**.
+The Lambda is packaged as a zip from `dist/` (built by esbuild) and deployed with Terraform.
+Both stages use the exact same code path — a normal zip deploy:
 
-When `s3_bucket = "hot-reload"` is set on a Lambda resource, LocalStack does not treat it as a real S3 bucket. Instead it:
+- `stage=local` → deployed to MiniStack (endpoints redirected to `localhost:4566` by `tflocal`)
+- `stage=prod` → deployed to real AWS
 
-1. bind-mounts `s3_key` (an absolute path on the **host** machine) into `/var/task`
-2. watches that path for file changes
-3. reloads the function runtime on the next invoke — no container restart, no re-deploy
-
-Combined with `esbuild --watch` rebuilding TypeScript in under 100ms, the total feedback loop is **under one second**.
+The dev loop after editing a handler:
 
 ```
 Edit src/handlers/hello.ts
-  → esbuild rebuilds dist/hello.js (~80ms)
-    → LocalStack detects the change
-      → next invoke runs new code (~500ms)
+  → npm run build           (esbuild rebuilds dist/hello.js, ~1–10 ms)
+    → tflocal apply         (Terraform sees the new source_code_hash → UpdateFunctionCode, ~8.7 s)
+      → npm run invoke      (~0.5 s)
 ```
 
-The same `main.tf` works for real AWS — switch `stage=prod` and it deploys a zip instead.
+There is no watch-and-reload: the warm worker holds the code loaded at deploy time and does not
+re-read disk between invokes. A rebuild alone does nothing until you re-apply.
+
+---
+
+## > IMPORTANT: the hot-reload "magic bucket" does not exist on MiniStack
+
+This repo used to set `s3_bucket = "hot-reload"` (a LocalStack magic marker). On MiniStack that
+bucket is just an ordinary — and missing — S3 source, and the behaviour is a trap, because
+**CreateFunction and UpdateFunctionCode disagree**:
+
+- **CreateFunction does not validate the source.** `tflocal apply` goes green (`4 added`), but the
+  function has no code:
+
+  ```
+  $ aws lambda get-function --function-name hello   # → CodeSize: 0
+  $ aws lambda invoke ...
+  {"statusCode": 200, "body": "Mock response - no code deployed"}
+  ```
+
+  A silently fake Lambda — worse than an error.
+
+- **UpdateFunctionCode does validate it**, and fails loudly:
+
+  ```
+  An error occurred (InvalidParameterValueException) when calling the UpdateFunctionCode
+  operation: Failed to fetch code from s3://hot-reload/<absolute-dist-path>
+  ```
+
+Both were reproduced directly against `ministackorg/ministack:latest` in this repo. The fix in
+this branch: **drop the magic-bucket branch entirely** and always deploy the real zip (see
+`infra/main.tf`).
 
 ---
 
 ## Prerequisites
 
-| Tool                        | Install                                                                                                                               |
-| --------------------------- | ------------------------------------------------------------------------------------------------------------------------------------- |
-| Docker                      | [docker.com](https://www.docker.com/)                                                                                                 |
-| Node.js 20+                 | [nodejs.org](https://nodejs.org/)                                                                                                     |
-| Terraform ≥ 1.5 or OpenTofu | [terraform.io](https://www.terraform.io/) / [opentofu.org](https://opentofu.org/)                                                     |
-| `awslocal`                  | `pip install awscli-local`                                                                                                            |
-| `tflocal`                   | `pip install terraform-local`                                                                                                         |
-| LocalStack account          | Free [Hobby plan](https://www.localstack.cloud/pricing) — get your auth token at [app.localstack.cloud](https://app.localstack.cloud) |
+| Tool                        | Install                                                                            |
+| --------------------------- | --------------------------------------------------------------------------------- |
+| Docker                      | [docker.com](https://www.docker.com/)                                             |
+| Node.js 20+                 | [nodejs.org](https://nodejs.org/)                                                 |
+| Terraform ≥ 1.5 or OpenTofu | [terraform.io](https://www.terraform.io/) / [opentofu.org](https://opentofu.org/) |
+| `awslocal`                  | `pip install awscli-local`                                                         |
+| `tflocal`                   | `pip install terraform-local`                                                      |
+
+No account and no auth token — MiniStack is free (MIT). The Docker socket is **not** required for
+this `nodejs20.x` function: MiniStack runs it in an in-process warm worker, not a container. (The
+socket is only needed for container-backed services like RDS/ECS or `provided.*` Lambda runtimes.)
+
+> `awslocal` and `tflocal` are LocalStack's host-side CLIs. They point standard `aws` and
+> `terraform` at `http://localhost:4566`, and MiniStack is endpoint-compatible, so they work
+> unchanged.
 
 ---
 
@@ -57,74 +99,29 @@ Or step by step:
 npm install
 npm run build
 
-# 2. Set environment variables
-export HOST_DIST_PATH="$(pwd)/dist"
-export LOCALSTACK_AUTH_TOKEN="your-token-here"  # from app.localstack.cloud
-
-# 3. Start LocalStack
+# 2. Start MiniStack
 docker compose up -d
 
-# 4. Deploy to LocalStack (once)
+# 3. Deploy (zip) to MiniStack
 cd infra
 tflocal init
-tflocal apply -auto-approve \
-  -var="stage=local" \
-  -var="lambda_mount_path=${HOST_DIST_PATH}"
+tflocal apply -auto-approve -var="stage=local"
 cd ..
 
-# 5. Invoke the function
+# 4. Invoke the function
 npm run invoke
 
-# 6. Start watch mode (separate terminal)
-npm run watch
-
-# 7. Edit src/handlers/hello.ts, save, then invoke — see updated response
+# 5. After editing src/handlers/hello.ts, rebuild AND re-deploy to pick it up
+npm run build
+(cd infra && tflocal apply -auto-approve -var="stage=local")
 npm run invoke
 
-# 8. Tail logs
+# 6. Tail logs
 npm run logs
 ```
 
-> **Why `HOST_DIST_PATH`?**
-> LocalStack spawns a child Docker container for each Lambda invocation and mounts
-> `lambda_mount_path` from the **host** filesystem directly — not from inside the
-> LocalStack container. So the path must be a real path on your machine, and it must
-> be the same in both the `docker-compose.yml` volume and the `lambda_mount_path` variable.
->
-> **`LOCALSTACK_AUTH_TOKEN`** is required since LocalStack 2026.03.0.
-> Get yours free at [app.localstack.cloud](https://app.localstack.cloud) (Hobby plan, non-commercial use).
-
----
-
-## Docker Desktop: File Sharing (macOS)
-
-On macOS with Docker Desktop you must explicitly allow the path to be mounted.
-
-Go to **Docker Desktop → Settings → Resources → File Sharing** and add:
-
-```
-/Users/<your-username>
-```
-
-Or the specific project path if you prefer a narrower scope. Click **Apply & Restart**.
-
-Without this step Docker will refuse to mount the `dist/` folder and Lambda invocations
-will fail with `mounts denied`.
-
----
-
-## OpenTofu
-
-```bash
-export HOST_DIST_PATH="$(pwd)/dist"
-export LOCALSTACK_AUTH_TOKEN="your-token-here"
-docker compose up -d
-cd infra
-TF_CMD=tofu tflocal init
-TF_CMD=tofu tflocal apply -auto-approve \
-  -var="stage=local" \
-  -var="lambda_mount_path=${HOST_DIST_PATH}"
-```
+`npm run watch` still works to rebuild `dist/` on save, but remember: on MiniStack a rebuild does
+nothing until you re-apply.
 
 ---
 
@@ -136,41 +133,90 @@ terraform init
 terraform apply -var="stage=prod"
 ```
 
-The `stage != "local"` path skips the hot-reload bucket and builds a zip from `dist/`.
+Same zip, real AWS endpoints. `stage` also drives the IAM role name and the `STAGE` env var.
+
+---
+
+## OpenTofu
+
+```bash
+docker compose up -d
+cd infra
+TF_CMD=tofu tflocal init
+TF_CMD=tofu tflocal apply -auto-approve -state=tofu.tfstate -var="stage=local"
+```
+
+Verified with OpenTofu v1.11.6 against MiniStack — `Apply complete! Resources: 4 added`, and
+`npm run invoke` returned the real handler output (`Hello, OpenTofu!`).
 
 ---
 
 ## Platform gotchas
 
-**Docker Desktop macOS (most common issue)** — Docker must be allowed to mount the project path. Go to **Settings → Resources → File Sharing** and add `/Users/<your-username>` or the specific project path. Click **Apply & Restart**. Without this you get `mounts denied` errors on Lambda invoke.
+**Hot-reload magic bucket** — not supported; see the [callout above](#-important-the-hot-reload-magic-bucket-does-not-exist-on-ministack). This branch removed it.
 
-**Rancher Desktop / Colima / WSL2** — polling-based file watching is enabled by default via `LAMBDA_DOCKER_FLAGS` in `docker-compose.yml`. If hot-reload doesn't pick up changes, see the [LocalStack hot-reload docs](https://docs.localstack.cloud/aws/tooling/lambda-tools/hot-reloading/) for platform-specific setup. Not tested with this repository — PRs welcome.
+**S3 uploads fail with a CRC64NVME checksum error** — modern AWS CLI (v2.3x+) defaults to the
+CRC64NVME checksum on `PutObject`, which this MiniStack build does not implement:
 
-**Terraform state drift** — `tflocal` writes to `terraform.tfstate` in `infra/`. Never run bare `terraform apply` in `infra/` after `tflocal apply` — it will try to recreate resources that LocalStack "owns". Use a separate workspace or state file:
+```
+$ aws --endpoint-url=http://localhost:4566 s3 cp file.txt s3://my-bucket/
+An error occurred (InvalidRequest) when calling the PutObject operation: Checksum algorithm not
+supported in this ministack build: CRC64NVME. Supported: SHA256, SHA1, CRC32.
+```
+
+Workaround — force a supported algorithm (or omit the checksum header):
+
+```bash
+AWS_REQUEST_CHECKSUM_CALCULATION=when_required aws --endpoint-url=http://localhost:4566 \
+  s3 cp file.txt s3://my-bucket/
+# or, on s3api calls:  --checksum-algorithm SHA256
+```
+
+This does not affect the Lambda deploy in this repo (Terraform's `archive_file` + `filename`
+uploads the zip through the Lambda API, not `s3 cp`), but it bites any direct S3 upload.
+
+**Terraform state drift** — `tflocal` writes to `terraform.tfstate` in `infra/`. Never run bare
+`terraform apply` in `infra/` after `tflocal apply` — it will try to recreate resources that the
+local emulator "owns". Use a separate workspace or state file:
 
 ```bash
 # Option A: separate workspace
 terraform workspace new local
 
 # Option B: separate state file
-tflocal apply -state=local.tfstate \
-  -var="stage=local" \
-  -var="lambda_mount_path=${HOST_DIST_PATH}"
+tflocal apply -state=local.tfstate -var="stage=local"
 ```
 
 ---
 
-## What works on LocalStack Hobby plan (free)
+## Measured performance
 
-Everything in this repository runs on the free [Hobby plan](https://www.localstack.cloud/pricing) (non-commercial use, requires auth token).
+Measured in this repo against `ministackorg/ministack:latest`, macOS. Your numbers will vary.
 
-Verified with this repository:
+| Step                                       | Time                       |
+| ------------------------------------------ | -------------------------- |
+| MiniStack container startup → `Ready`      | < 2 s                      |
+| esbuild rebuild (`npm run build`)          | ~1–10 ms                   |
+| Warm invoke (steady state)                 | ~0.5 s (median of 6)       |
+| First invoke right after a (re)deploy      | ~2.5–2.8 s (worker warming)|
+| Re-deploy (`tflocal apply -var=stage=local`)| ~8.7 s                     |
 
-- Lambda execution + hot-reload
-- CloudWatch Logs
-- IAM roles (created, but **not enforced** — a Lambda that passes locally may fail in AWS due to missing permissions)
+The edit→see-it loop is therefore dominated by the ~8.7 s re-apply, not by the millisecond
+rebuild or the sub-second invoke. There is no sub-second hot-reload cycle on MiniStack.
 
-The Hobby plan includes 30+ emulated AWS services. For the full list by plan, see [Emulated Services](https://docs.localstack.cloud/aws/licensing/).
+---
+
+## What works here
+
+Verified in this repository against `ministackorg/ministack:latest`:
+
+- Lambda zip deploy + execution (`nodejs20.x`, real Node.js runtime in the warm worker pool)
+- CloudWatch Logs (`npm run logs`)
+- IAM roles (created, but **not enforced** — a Lambda that passes locally may fail on real AWS
+  due to missing permissions)
+
+MiniStack emulates many more AWS services; see the
+[MiniStack README](https://github.com/ministackorg/ministack) for the full list.
 
 ---
 
@@ -178,7 +224,7 @@ The Hobby plan includes 30+ emulated AWS services. For the full list by plan, se
 
 ```
 .
-├── docker-compose.yml        # LocalStack + volume mount
+├── docker-compose.yml        # MiniStack (image + port only)
 ├── package.json              # build / watch / invoke scripts
 ├── tsconfig.json
 ├── src/
@@ -186,7 +232,7 @@ The Hobby plan includes 30+ emulated AWS services. For the full list by plan, se
 │       └── hello.ts          # Lambda handler
 ├── dist/                     # esbuild output (gitignored)
 ├── infra/
-│   ├── main.tf               # one config for local + prod
+│   ├── main.tf               # one config for local + prod (zip deploy)
 │   ├── variables.tf
 │   └── outputs.tf
 └── scripts/
@@ -197,6 +243,6 @@ The Hobby plan includes 30+ emulated AWS services. For the full list by plan, se
 
 ## Related
 
-- [LocalStack hot-reload docs](https://docs.localstack.cloud/aws/tooling/lambda-tools/hot-reloading/)
+- [MiniStack](https://github.com/ministackorg/ministack) — the AWS emulator used here
+- [ministack.org](https://ministack.org) — docs
 - [tflocal (terraform-local)](https://github.com/localstack/terraform-local)
-- [AWS SAM CLI with Terraform](https://docs.aws.amazon.com/serverless-application-model/latest/developerguide/using-samcli-terraform.html) — alternative for step-through debugging

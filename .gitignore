@@ -14,3 +14,4 @@ localstack_providers_override.tf
 
 # OS
 .DS_Store
+*.tfstate.*.backup
