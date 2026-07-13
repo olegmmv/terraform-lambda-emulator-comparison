@@ -1,202 +1,127 @@
-# TypeScript Lambda hot-reload with Terraform and LocalStack
+# Local AWS emulators compared: LocalStack vs Floci vs MiniStack
 
-Sub-second Lambda iteration cycles using the same Terraform config that deploys to production.
+In March 2026 LocalStack removed its free Community edition — the emulator now requires
+an account and a `LOCALSTACK_AUTH_TOKEN` even on the Hobby plan. Two MIT-licensed,
+LocalStack-compatible alternatives appeared in its wake: [Floci](https://github.com/floci-io/floci)
+and [MiniStack](https://github.com/ministackorg/ministack). This repository runs **the same
+Terraform + TypeScript Lambda setup** through all three emulators — one `main.tf`, one
+`hello.ts` handler, one esbuild pipeline — and measures the inner development loop
+(edit → build → invoke) on each.
 
-No second config file. No manual `aws lambda update-function-code`. No re-running `tflocal apply` on every edit.
-
----
-
-## How it works
-
-The key is LocalStack's **hot-reload magic bucket**.
-
-When `s3_bucket = "hot-reload"` is set on a Lambda resource, LocalStack does not treat it as a real S3 bucket. Instead it:
-
-1. bind-mounts `s3_key` (an absolute path on the **host** machine) into `/var/task`
-2. watches that path for file changes
-3. reloads the function runtime on the next invoke — no container restart, no re-deploy
-
-Combined with `esbuild --watch` rebuilding TypeScript in under 100ms, the total feedback loop is **under one second**.
-
-```
-Edit src/handlers/hello.ts
-  → esbuild rebuilds dist/hello.js (~80ms)
-    → LocalStack detects the change
-      → next invoke runs new code (~500ms)
-```
-
-The same `main.tf` works for real AWS — switch `stage=prod` and it deploys a zip instead.
+Each implementation lives on its own branch; `main` is this comparison hub. The numbers below
+come from a single machine on the dates noted — see [Methodology](#methodology).
 
 ---
 
-## Prerequisites
+## Comparison
 
-| Tool                        | Install                                                                                                                               |
-| --------------------------- | ------------------------------------------------------------------------------------------------------------------------------------- |
-| Docker                      | [docker.com](https://www.docker.com/)                                                                                                 |
-| Node.js 20+                 | [nodejs.org](https://nodejs.org/)                                                                                                     |
-| Terraform ≥ 1.5 or OpenTofu | [terraform.io](https://www.terraform.io/) / [opentofu.org](https://opentofu.org/)                                                     |
-| `awslocal`                  | `pip install awscli-local`                                                                                                            |
-| `tflocal`                   | `pip install terraform-local`                                                                                                         |
-| LocalStack account          | Free [Hobby plan](https://www.localstack.cloud/pricing) — get your auth token at [app.localstack.cloud](https://app.localstack.cloud) |
+|                                    | LocalStack (Hobby)                      | Floci                                                          | MiniStack                                                                                                        |
+| ---------------------------------- | --------------------------------------- | ------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------- |
+| Account / auth token               | required                                | none                                                          | none                                                                                                            |
+| Container startup                  | ~4.6–5.4 s                              | < 1 s                                                         | < 2 s                                                                                                          |
+| Cold invoke (first call)           | ~4.0 s                                  | ~3.7 s                                                        | ~2.5–2.8 s ¹                                                                                                    |
+| Hot-reload                         | ✅ on by default                         | ✅ behind `FLOCI_SERVICES_LAMBDA_HOT_RELOAD_ENABLED`           | ❌ none (in-process worker pool)                                                                                |
+| Magic bucket w/ missing code       | works                                   | works                                                         | ⚠️ Create: silent stub (CodeSize 0, `"Mock response - no code deployed"`); Update: loud `InvalidParameterValueException` |
+| Warm invoke                        | ~0.56 s                                 | ~1.4 s                                                        | ~0.5 s                                                                                                         |
+| Loop after code edit               | ~1.2 s                                  | ~1.4 s                                                        | ~9.2 s ² (rebuild + re-apply + invoke)                                                                          |
+| esbuild rebuild                    | ~1–7 ms                                 | ~1–7 ms                                                       | ~1–10 ms                                                                                                       |
+| tflocal / OpenTofu v1.11.6         | ✅ / ✅                                   | ✅ / ✅                                                         | ✅ / ✅                                                                                                          |
+| Branch-specific gotchas            | host-path mount, macOS File Sharing     | hot-reload flag off by default                               | CRC64NVME checksums unsupported                                                                                 |
 
----
+¹ MiniStack's first-invoke cost is warm **worker-pool** warming, not container spin-up — it runs
+Node.js Lambdas in-process, with no per-function container.
 
-## Quickstart
-
-```bash
-git clone https://github.com/olegmmv/terraform-lambda-typescript-localstack
-cd terraform-lambda-typescript-localstack
-bash scripts/setup.sh
-```
-
-Or step by step:
-
-```bash
-# 1. Install dependencies and build
-npm install
-npm run build
-
-# 2. Set environment variables
-export HOST_DIST_PATH="$(pwd)/dist"
-export LOCALSTACK_AUTH_TOKEN="your-token-here"  # from app.localstack.cloud
-
-# 3. Start LocalStack
-docker compose up -d
-
-# 4. Deploy to LocalStack (once)
-cd infra
-tflocal init
-tflocal apply -auto-approve \
-  -var="stage=local" \
-  -var="lambda_mount_path=${HOST_DIST_PATH}"
-cd ..
-
-# 5. Invoke the function
-npm run invoke
-
-# 6. Start watch mode (separate terminal)
-npm run watch
-
-# 7. Edit src/handlers/hello.ts, save, then invoke — see updated response
-npm run invoke
-
-# 8. Tail logs
-npm run logs
-```
-
-> **Why `HOST_DIST_PATH`?**
-> LocalStack spawns a child Docker container for each Lambda invocation and mounts
-> `lambda_mount_path` from the **host** filesystem directly — not from inside the
-> LocalStack container. So the path must be a real path on your machine, and it must
-> be the same in both the `docker-compose.yml` volume and the `lambda_mount_path` variable.
->
-> **`LOCALSTACK_AUTH_TOKEN`** is required since LocalStack 2026.03.0.
-> Get yours free at [app.localstack.cloud](https://app.localstack.cloud) (Hobby plan, non-commercial use).
+² MiniStack has no hot-reload; the loop is rebuild + `tflocal apply` (~8.7 s) + invoke (~0.5 s).
 
 ---
 
-## Docker Desktop: File Sharing (macOS)
+## Methodology
 
-On macOS with Docker Desktop you must explicitly allow the path to be mounted.
+All figures are from **one machine**: macOS on Apple Silicon (arm64), Docker Desktop. Same repo,
+same handler, same esbuild config across all three; only the emulator (and the branch's
+`docker-compose.yml` / `main.tf` wiring) differs.
 
-Go to **Docker Desktop → Settings → Resources → File Sharing** and add:
+Images and measurement dates:
 
-```
-/Users/<your-username>
-```
+- **LocalStack** — `localstack/localstack:latest`, image ID `24bfb26791eb` (created 2026-04-28).
+  Measured **2026-07-13**.
+- **Floci** — `floci/floci:latest` (Floci 1.5.30), image ID `51c2a38d394f` (created 2026-07-03).
+  Measured **July 2026** (see the [floci branch README](../../tree/floci)).
+- **MiniStack** — `ministackorg/ministack:latest`, image ID `65f91ff15e63` (created 2026-06-30).
+  Measured **July 2026** (see the [ministack branch README](../../tree/ministack)).
 
-Or the specific project path if you prefer a narrower scope. Click **Apply & Restart**.
+Protocol:
 
-Without this step Docker will refuse to mount the `dist/` folder and Lambda invocations
-will fail with `mounts denied`.
+- **Container startup** — `docker compose up -d`, then poll until the Lambda API answers.
+- **Warm invoke** — 5 consecutive runs, first (cold) discarded, median of remaining 4 (LocalStack,
+  this session; Floci and MiniStack report medians of 6 runs — see their branch READMEs).
+- **Loop after code edit** — 6× of: `sed` a unique marker into `src/handlers/hello.ts` →
+  `npm run build` → `sleep 2` → timed `npm run invoke`, verifying every invoke returned the new
+  marker. For LocalStack and Floci this is a hot-reload cycle (no re-apply); for MiniStack the
+  loop includes `tflocal apply` (~8.7 s), since a rebuild alone does nothing until re-deploy.
 
----
-
-## OpenTofu
-
-```bash
-export HOST_DIST_PATH="$(pwd)/dist"
-export LOCALSTACK_AUTH_TOKEN="your-token-here"
-docker compose up -d
-cd infra
-TF_CMD=tofu tflocal init
-TF_CMD=tofu tflocal apply -auto-approve \
-  -var="stage=local" \
-  -var="lambda_mount_path=${HOST_DIST_PATH}"
-```
+> **Single machine — your numbers will vary** with hardware, Docker settings, and image version.
+> Treat these as relative shapes, not benchmarks.
 
 ---
 
-## Deploy to real AWS
+## Branches
 
-```bash
-cd infra
-terraform init
-terraform apply -var="stage=prod"
-```
+Each emulator has a complete, self-contained implementation with its own README, `main.tf`,
+and `docker-compose.yml`. `main`'s code is the LocalStack implementation (mirrored on the
+`localstack` branch for symmetry).
 
-The `stage != "local"` path skips the hot-reload bucket and builds a zip from `dist/`.
-
----
-
-## Platform gotchas
-
-**Docker Desktop macOS (most common issue)** — Docker must be allowed to mount the project path. Go to **Settings → Resources → File Sharing** and add `/Users/<your-username>` or the specific project path. Click **Apply & Restart**. Without this you get `mounts denied` errors on Lambda invoke.
-
-**Rancher Desktop / Colima / WSL2** — polling-based file watching is enabled by default via `LAMBDA_DOCKER_FLAGS` in `docker-compose.yml`. If hot-reload doesn't pick up changes, see the [LocalStack hot-reload docs](https://docs.localstack.cloud/aws/tooling/lambda-tools/hot-reloading/) for platform-specific setup. Not tested with this repository — PRs welcome.
-
-**Terraform state drift** — `tflocal` writes to `terraform.tfstate` in `infra/`. Never run bare `terraform apply` in `infra/` after `tflocal apply` — it will try to recreate resources that LocalStack "owns". Use a separate workspace or state file:
-
-```bash
-# Option A: separate workspace
-terraform workspace new local
-
-# Option B: separate state file
-tflocal apply -state=local.tfstate \
-  -var="stage=local" \
-  -var="lambda_mount_path=${HOST_DIST_PATH}"
-```
+| Branch                             | What's inside                                                                                  | Clone                                                                    |
+| ---------------------------------- | ---------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------- |
+| [`localstack`](../../tree/localstack) | LocalStack Hobby plan — hot-reload magic bucket, requires an auth token.                        | `git clone -b localstack https://github.com/olegmmv/terraform-lambda-typescript-localstack` |
+| [`floci`](../../tree/floci)           | Floci — same magic-bucket hot-reload, no account, hot-reload gated behind an env flag.          | `git clone -b floci https://github.com/olegmmv/terraform-lambda-typescript-localstack`      |
+| [`ministack`](../../tree/ministack)   | MiniStack — zip deploy to an in-process worker pool, no hot-reload; rebuild + re-apply to update. | `git clone -b ministack https://github.com/olegmmv/terraform-lambda-typescript-localstack`  |
 
 ---
 
-## What works on LocalStack Hobby plan (free)
+## Findings
 
-Everything in this repository runs on the free [Hobby plan](https://www.localstack.cloud/pricing) (non-commercial use, requires auth token).
+**Three reload mechanisms, three inner loops.** The emulators reload code in fundamentally
+different ways, and the inner loop follows directly. LocalStack and Floci both implement the
+`s3_bucket = "hot-reload"` magic bucket: they bind-mount the host `dist/` into the Lambda
+environment and pick up a rebuild on the next invoke, so the edit→invoke loop is roughly one
+invoke long (~1.2 s LocalStack, ~1.4 s Floci). MiniStack has no equivalent — it runs Node.js
+Lambdas in an in-process warm worker pool that holds the code loaded at deploy time, so a
+rebuild does nothing until `tflocal apply` re-deploys the zip, making the loop ~9.2 s
+(rebuild + ~8.7 s re-apply + invoke).
 
-Verified with this repository:
+**MiniStack's Create-vs-Update inconsistency is the sharpest gotcha.** On MiniStack the
+LocalStack magic bucket is just an ordinary — and missing — S3 source, and the two Lambda code
+paths disagree about it. `CreateFunction` does **not** validate the source: `tflocal apply` goes
+green (`4 added`) but the function has `CodeSize: 0` and invoking it returns a silent stub,
+`"Mock response - no code deployed"` — a fake Lambda that looks deployed. `UpdateFunctionCode`
+**does** validate, failing loudly with `InvalidParameterValueException: Failed to fetch code from
+s3://hot-reload/…`. The ministack branch removes the magic-bucket path entirely and always
+deploys a real zip.
 
-- Lambda execution + hot-reload
-- CloudWatch Logs
-- IAM roles (created, but **not enforced** — a Lambda that passes locally may fail in AWS due to missing permissions)
+**Floci trades startup and account for a costlier invoke.** Floci starts in under a second and
+needs no account or auth token, but each warm invoke runs ~1.4 s — noticeably more than
+LocalStack's ~0.56 s or MiniStack's ~0.5 s. Its one setup catch is that hot-reload is off by
+default: `CreateFunction` on the hot-reload bucket fails with
+`InvalidParameterValueException: Hot-reload is disabled.` until
+`FLOCI_SERVICES_LAMBDA_HOT_RELOAD_ENABLED=true` is set (already done in the floci branch).
 
-The Hobby plan includes 30+ emulated AWS services. For the full list by plan, see [Emulated Services](https://docs.localstack.cloud/aws/licensing/).
+**LocalStack has the shortest measured loop but the heaviest requirements.** Its ~1.2 s
+edit→invoke loop and ~0.56 s warm invoke were the lowest of the three here, but it is the only
+one that requires an account and a `LOCALSTACK_AUTH_TOKEN`, and it sits on a paid product
+trajectory rather than a free/MIT one.
+
+**Observation — both container-backed emulators pay for the first edit.** On LocalStack and
+Floci (both of which run each Lambda in a real container), the first invoke *after the first code
+change* was more expensive than steady state — ~3.4–3.5 s (LocalStack's first after-edit invoke
+was 3.47 s; Floci's after-edit runs ranged 1.38–3.40 s), after which subsequent edits settled to
+the steady per-invoke cost (~1.2 s LocalStack, ~1.4 s Floci). This is reported here purely as an
+observation from the measurements, without claim as to cause.
 
 ---
 
-## Project structure
+## License
 
-```
-.
-├── docker-compose.yml        # LocalStack + volume mount
-├── package.json              # build / watch / invoke scripts
-├── tsconfig.json
-├── src/
-│   └── handlers/
-│       └── hello.ts          # Lambda handler
-├── dist/                     # esbuild output (gitignored)
-├── infra/
-│   ├── main.tf               # one config for local + prod
-│   ├── variables.tf
-│   └── outputs.tf
-└── scripts/
-    └── setup.sh              # one-shot bootstrap
-```
+MIT — see [LICENSE](LICENSE).
 
----
-
-## Related
-
-- [LocalStack hot-reload docs](https://docs.localstack.cloud/aws/tooling/lambda-tools/hot-reloading/)
-- [tflocal (terraform-local)](https://github.com/localstack/terraform-local)
-- [AWS SAM CLI with Terraform](https://docs.aws.amazon.com/serverless-application-model/latest/developerguide/using-samcli-terraform.html) — alternative for step-through debugging
+<!-- article link -->
