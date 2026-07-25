@@ -45,8 +45,8 @@ The same `main.tf` works for real AWS — switch `stage=prod` and it deploys a z
 ## Quickstart
 
 ```bash
-git clone https://github.com/olegmmv/terraform-lambda-typescript-localstack
-cd terraform-lambda-typescript-localstack
+git clone https://github.com/olegmmv/terraform-lambda-emulator-comparison
+cd terraform-lambda-emulator-comparison
 bash scripts/setup.sh
 ```
 
