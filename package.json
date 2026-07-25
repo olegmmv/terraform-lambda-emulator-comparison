@@ -1,5 +1,5 @@
 {
-  "name": "terraform-lambda-typescript-localstack",
+  "name": "terraform-lambda-emulator-comparison",
   "version": "1.0.0",
   "description": "TypeScript Lambda local development with Terraform and LocalStack hot-reload",
   "scripts": {

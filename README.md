@@ -73,9 +73,9 @@ and `docker-compose.yml`. `main`'s code is the LocalStack implementation (mirror
 
 | Branch                             | What's inside                                                                                  | Clone                                                                    |
 | ---------------------------------- | ---------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------- |
-| [`localstack`](../../tree/localstack) | LocalStack Hobby plan — hot-reload magic bucket, requires an auth token.                        | `git clone -b localstack https://github.com/olegmmv/terraform-lambda-typescript-localstack` |
-| [`floci`](../../tree/floci)           | Floci — same magic-bucket hot-reload, no account, hot-reload gated behind an env flag.          | `git clone -b floci https://github.com/olegmmv/terraform-lambda-typescript-localstack`      |
-| [`ministack`](../../tree/ministack)   | MiniStack — zip deploy to an in-process worker pool, no hot-reload; rebuild + re-apply to update. | `git clone -b ministack https://github.com/olegmmv/terraform-lambda-typescript-localstack`  |
+| [`localstack`](../../tree/localstack) | LocalStack Hobby plan — hot-reload magic bucket, requires an auth token.                        | `git clone -b localstack https://github.com/olegmmv/terraform-lambda-emulator-comparison` |
+| [`floci`](../../tree/floci)           | Floci — same magic-bucket hot-reload, no account, hot-reload gated behind an env flag.          | `git clone -b floci https://github.com/olegmmv/terraform-lambda-emulator-comparison`      |
+| [`ministack`](../../tree/ministack)   | MiniStack — zip deploy to an in-process worker pool, no hot-reload; rebuild + re-apply to update. | `git clone -b ministack https://github.com/olegmmv/terraform-lambda-emulator-comparison`  |
 
 ---
 
