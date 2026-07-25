@@ -62,8 +62,8 @@ No account and no auth token are required — Floci is free and needs neither.
 ## Quickstart
 
 ```bash
-git clone https://github.com/olegmmv/terraform-lambda-typescript-localstack
-cd terraform-lambda-typescript-localstack
+git clone https://github.com/olegmmv/terraform-lambda-emulator-comparison
+cd terraform-lambda-emulator-comparison
 bash scripts/setup.sh
 ```
 
